@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from borrowing_base_workbench.calculator import calculate_portfolio
 from borrowing_base_workbench.loader import load_workbook_data
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ _CONCENTRATION_TESTS = [
 
 
 def _stub_metrics(current_advances: float = 0.0) -> dict:
-    """Zeroed metric placeholders. Replaced by calculator.py in Phase 3."""
+    """Zeroed metric placeholders for fields not yet computed (Phase 4+)."""
     return {
         "availability": 0.0,
         "total_portfolio_par": 0.0,
@@ -54,6 +55,31 @@ def _stub_metrics(current_advances: float = 0.0) -> dict:
         "credit_enhancement_test": "",
         "weighted_avg_advance_rate": 0.0,
         "current_advances": current_advances,
+    }
+
+
+def _metrics_from_calculator(calc, current_advances: float) -> dict:
+    """Build metrics dict from Phase 3 calculator output.
+
+    Phase 3 populates: total_portfolio_par, aggregate_adjusted_bv,
+    weighted_avg_advance_rate.
+    Still stubbed: availability, excess_concentration, net_adjusted_bv,
+    credit_enhancement_test (require Phase 4 concentration waterfall).
+    """
+    return {
+        "availability": 0.0,             # Phase 4
+        "total_portfolio_par": calc.total_portfolio_par,
+        "aggregate_adjusted_bv": calc.total_pre_conc_eligible_value,
+        "excess_concentration": 0.0,      # Phase 4
+        "net_adjusted_bv": calc.total_pre_conc_eligible_value,  # Phase 4 will subtract excess
+        "credit_enhancement_test": "",    # Phase 4
+        "weighted_avg_advance_rate": calc.implied_weighted_avg_advance_rate,
+        "current_advances": current_advances,
+        # extra fields for debug (ignored by frontend)
+        "eligible_count": len(calc.eligible_assets),
+        "ineligible_count": len(calc.ineligible_assets),
+        "vae_affected_count": len(calc.vae_affected),
+        "total_borrowing_value": calc.total_borrowing_value,
     }
 
 
@@ -135,13 +161,24 @@ def probe_workbook(workbook_path: str | Path) -> dict:
             "remediation": "Ensure the workbook is accessible and not exclusively locked.",
         }
 
-    metrics = _stub_metrics(current_advances=data.availability_meta.current_advances)
+    try:
+        calc = calculate_portfolio(data)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Calculator error: {exc}",
+            "remediation": "Check calculator.py for data issues.",
+        }
+
+    advances = data.availability_meta.current_advances
+    metrics = _metrics_from_calculator(calc, advances)
     concentration_limits = _concentration_limits_from_policy(data.policy)
 
     return {
         "status": "ok",
         "workbook_path": str(workbook_path),
         "loader_summary": data.summary(),  # extra field — ignored by frontend, useful for debug
+        "calculator_summary": calc.summary(),  # extra field — Phase 3 debug
         "metrics": metrics,
         "concentration_limits": concentration_limits,
     }
