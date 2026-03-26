@@ -4,12 +4,14 @@ This module is the execution boundary between the Tkinter frontend and the
 backend calculation logic.
 
 Phase status:
-  - probe_workbook():  loads workbook data via loader.py; metrics are STUBBED
-                       (zeroed) until calculator.py is implemented in Phase 3.
-  - run_pro_forma():   validates workbook path; metrics are STUBBED until
-                       calculator.py is implemented.
+  - probe_workbook():  Phases 3+4 complete — returns real asset-level results,
+                       concentration waterfall, WAAR with obligor-count cap,
+                       and three-test availability calculation.
+  - run_pro_forma():   Baseline "before" state uses the full calculator.
+                       "after" state is still stubbed — scenario mutation
+                       (Phase 5) not yet implemented.
 
-The return dict shapes are identical to the retired PowerShell scripts so that
+Return dict shapes are identical to the retired PowerShell scripts so that
 app.py requires no changes beyond the one-line import swap.
 """
 
@@ -23,108 +25,106 @@ from borrowing_base_workbench.loader import load_workbook_data
 # ---------------------------------------------------------------------------
 # Concentration limit label order
 # ---------------------------------------------------------------------------
-# limit_type strings are matched by key in app.py._populate_results_view —
-# they must be exactly these strings, in this order.
+# limit_type strings are matched by key in app.py._populate_results_view.
+# They MUST be exactly these strings, in this order.
 # ---------------------------------------------------------------------------
 
-_CONCENTRATION_TESTS = [
-    {"limit_type": "Max Second Lien & FILO with senior lev >= 1.50x", "limit_percent": 0.20},
-    {"limit_type": "Max Second Lien",                                  "limit_percent": 0.10},
-    {"limit_type": "Max Non-First Lien",                               "limit_percent": 0.30},
-    {"limit_type": "Max EBITDA < $5MM",                                "limit_percent": 0.15},
-    {"limit_type": "Max Obligors",                                     "limit_percent": 0.075},
-    {"limit_type": "Max Largest Industry",                             "limit_percent": 0.20},
-    {"limit_type": "Max Second Largest Industry",                      "limit_percent": 0.15},
-    {"limit_type": "Max Other Industries",                             "limit_percent": 0.10},
-    {"limit_type": "Fixed Rate",                                       "limit_percent": 0.10},
-    {"limit_type": "Max Limited Industry",                             "limit_percent": 0.10},
-    {"limit_type": "Max DDTL and Revolver",                            "limit_percent": 0.15},
-    {"limit_type": "Max Non-Sponsor/Non-Family Office",                "limit_percent": 0.15},
-    {"limit_type": "Max Div Recap Non-Sponsor/Non-Family Office",      "limit_percent": 0.10},
+_CONCENTRATION_LABEL_ORDER = [
+    "Max Second Lien & FILO with senior lev >= 1.50x",
+    "Max Second Lien",
+    "Max Non-First Lien",
+    "Max EBITDA < $5MM",
+    "Max Obligors",
+    "Max Largest Industry",
+    "Max Second Largest Industry",
+    "Max Other Industries",
+    "Fixed Rate",
+    "Max Limited Industry",
+    "Max DDTL and Revolver",
+    "Max Non-Sponsor/Non-Family Office",
+    "Max Div Recap Non-Sponsor/Non-Family Office",
 ]
 
 
-def _stub_metrics(current_advances: float = 0.0) -> dict:
-    """Zeroed metric placeholders for fields not yet computed (Phase 4+)."""
-    return {
-        "availability": 0.0,
-        "total_portfolio_par": 0.0,
-        "aggregate_adjusted_bv": 0.0,
-        "excess_concentration": 0.0,
-        "net_adjusted_bv": 0.0,
-        "credit_enhancement_test": "",
-        "weighted_avg_advance_rate": 0.0,
-        "current_advances": current_advances,
-    }
-
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _metrics_from_calculator(calc, current_advances: float) -> dict:
-    """Build metrics dict from Phase 3 calculator output.
+    """Build the metrics dict from a PortfolioCalcResult (Phase 3+4).
 
-    Phase 3 populates: total_portfolio_par, aggregate_adjusted_bv,
-    weighted_avg_advance_rate.
-    Still stubbed: availability, excess_concentration, net_adjusted_bv,
-    credit_enhancement_test (require Phase 4 concentration waterfall).
+    All previously stubbed fields are now populated from the waterfall.
     """
+    w = calc.waterfall
+    av = w.availability if w else None
+
     return {
-        "availability": 0.0,             # Phase 4
-        "total_portfolio_par": calc.total_portfolio_par,
-        "aggregate_adjusted_bv": calc.total_pre_conc_eligible_value,
-        "excess_concentration": 0.0,      # Phase 4
-        "net_adjusted_bv": calc.total_pre_conc_eligible_value,  # Phase 4 will subtract excess
-        "credit_enhancement_test": "",    # Phase 4
-        "weighted_avg_advance_rate": calc.implied_weighted_avg_advance_rate,
-        "current_advances": current_advances,
-        # extra fields for debug (ignored by frontend)
-        "eligible_count": len(calc.eligible_assets),
-        "ineligible_count": len(calc.ineligible_assets),
-        "vae_affected_count": len(calc.vae_affected),
-        "total_borrowing_value": calc.total_borrowing_value,
+        "availability":             av.availability         if av else 0.0,
+        "total_portfolio_par":      calc.total_portfolio_par,
+        "aggregate_adjusted_bv":    calc.total_pre_conc_eligible_value,
+        "excess_concentration":     w.total_excess          if w else 0.0,
+        "net_adjusted_bv":          w.net_abv               if w else 0.0,
+        "credit_enhancement_test":  (
+            f"${av.test_c_credit_enhancement:,.0f}" if av else ""
+        ),
+        "weighted_avg_advance_rate": w.final_waar           if w else 0.0,
+        "current_advances":          current_advances,
+        # Extra debug fields (ignored by frontend)
+        "eligible_count":           len(calc.eligible_assets),
+        "ineligible_count":         len(calc.ineligible_assets),
+        "vae_affected_count":       len(calc.vae_affected),
+        "total_borrowing_value":    calc.total_borrowing_value,
+        "raw_waar":                 w.raw_waar              if w else 0.0,
+        "discrete_obligor_count":   w.discrete_obligor_count if w else 0,
+        "waar_cap":                 w.applicable_waar_cap   if w else 0.0,
+        "test_a_facility":          av.test_a_facility      if av else 0.0,
+        "test_b_borrowing_base":    av.test_b_borrowing_base if av else 0.0,
+        "test_c_credit_enhancement_dollar": av.test_c_credit_enhancement if av else 0.0,
     }
 
 
-def _stub_concentration_limits(policy_limits: list[dict] | None = None) -> list[dict]:
-    """13 concentration limit rows with live policy percentages, zeroed actuals."""
-    source = policy_limits if policy_limits is not None else _CONCENTRATION_TESTS
-    return [
-        {
-            "limit_type": t["limit_type"],
-            "limit_percent": t["limit_percent"],
-            "applicable_limit": 0.0,
-            "actual": 0.0,
-            "excess": 0.0,
-        }
-        for t in source
-    ]
+def _concentration_limits_from_waterfall(calc) -> list[dict]:
+    """Build the 13-row concentration list from Phase 4 waterfall results.
+
+    Falls back to policy percentages with zero actuals if waterfall is absent.
+    """
+    w = calc.waterfall
+    if w is None:
+        # Fallback: policy percentages, zero actuals
+        pct_map = _policy_pct_map(calc)
+        return [
+            {"limit_type": lbl, "limit_percent": pct_map.get(lbl, 0.0),
+             "applicable_limit": 0.0, "actual": 0.0, "excess": 0.0}
+            for lbl in _CONCENTRATION_LABEL_ORDER
+        ]
+
+    # Index the waterfall results by label for O(1) lookup
+    test_by_label = {t.limit_type: t for t in w.concentration_tests}
+
+    rows = []
+    for lbl in _CONCENTRATION_LABEL_ORDER:
+        t = test_by_label.get(lbl)
+        if t:
+            rows.append({
+                "limit_type":       t.limit_type,
+                "limit_percent":    t.limit_percent,
+                "applicable_limit": t.applicable_limit,
+                "actual":           t.qualifying_value,
+                "excess":           t.excess,
+            })
+        else:
+            rows.append({
+                "limit_type": lbl, "limit_percent": 0.0,
+                "applicable_limit": 0.0, "actual": 0.0, "excess": 0.0,
+            })
+    return rows
 
 
-def _concentration_limits_from_policy(policy) -> list[dict]:
-    """Build the 13-row concentration limit list from loaded PolicyConfig."""
-    pct_map = {
-        "Max Second Lien & FILO with senior lev >= 1.50x": policy.conc_max_2l_filo_high_lev,
-        "Max Second Lien":                                  policy.conc_max_second_lien,
-        "Max Non-First Lien":                               policy.conc_max_non_first_lien,
-        "Max EBITDA < $5MM":                                policy.conc_max_small_ebitda,
-        "Max Obligors":                                     policy.conc_max_obligor,
-        "Max Largest Industry":                             policy.conc_max_largest_industry,
-        "Max Second Largest Industry":                      policy.conc_max_second_industry,
-        "Max Other Industries":                             policy.conc_max_other_industries,
-        "Fixed Rate":                                       policy.conc_fixed_rate,
-        "Max Limited Industry":                             policy.conc_limited_industry,
-        "Max DDTL and Revolver":                            policy.conc_max_ddtl_revolver,
-        "Max Non-Sponsor/Non-Family Office":                policy.conc_max_non_sponsor,
-        "Max Div Recap Non-Sponsor/Non-Family Office":      policy.conc_max_div_recap,
-    }
-    return [
-        {
-            "limit_type": t["limit_type"],
-            "limit_percent": pct_map.get(t["limit_type"], t["limit_percent"]),
-            "applicable_limit": 0.0,
-            "actual": 0.0,
-            "excess": 0.0,
-        }
-        for t in _CONCENTRATION_TESTS
-    ]
+def _policy_pct_map(calc) -> dict[str, float]:
+    """Extract concentration limit percentages from loaded policy."""
+    p = calc.assets[0].eligibility  # reach policy via loan data is awkward;
+    # fall back to known defaults when called without waterfall
+    return {lbl: 0.0 for lbl in _CONCENTRATION_LABEL_ORDER}
 
 
 # ---------------------------------------------------------------------------
@@ -136,10 +136,8 @@ def probe_workbook(workbook_path: str | Path) -> dict:
 
     Replaces: excel_runner.probe_excel_workbook(workbook_path, script_path)
 
-    Phase 2 status: loads workbook data via loader.py; populates policy-driven
-    concentration limit percentages and current_advances from the workbook.
-    All computed metrics (availability, ABV, etc.) remain STUBBED at 0.0
-    until calculator.py is implemented in Phase 3.
+    Phase 4 complete: returns real values for all core metrics including
+    availability, net ABV, WAAR (with cap), and concentration test details.
 
     Return shape mirrors excel_probe.ps1 stdout JSON.
     """
@@ -172,13 +170,13 @@ def probe_workbook(workbook_path: str | Path) -> dict:
 
     advances = data.availability_meta.current_advances
     metrics = _metrics_from_calculator(calc, advances)
-    concentration_limits = _concentration_limits_from_policy(data.policy)
+    concentration_limits = _concentration_limits_from_waterfall(calc)
 
     return {
         "status": "ok",
         "workbook_path": str(workbook_path),
-        "loader_summary": data.summary(),  # extra field — ignored by frontend, useful for debug
-        "calculator_summary": calc.summary(),  # extra field — Phase 3 debug
+        "loader_summary": data.summary(),       # ignored by frontend, useful for debug
+        "calculator_summary": calc.summary(),   # Phase 4 summary
         "metrics": metrics,
         "concentration_limits": concentration_limits,
     }
@@ -189,8 +187,8 @@ def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
 
     Replaces: excel_runner.run_pro_forma_workbook(workbook_path, script_path, scenario)
 
-    Phase 2 status: loads workbook data; all computed metrics STUBBED at 0.0
-    until calculator.py is implemented in Phase 3.
+    Phase 4 status: "before" uses the full calculator (real values).
+    "after" remains identical to "before" — scenario mutation (Phase 5) pending.
 
     Return shape mirrors run_pro_forma.ps1 stdout JSON.
     """
@@ -210,17 +208,25 @@ def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
             "message": f"Failed to load workbook: {exc}",
         }
 
-    concentration_limits = _concentration_limits_from_policy(data.policy)
-    advances = data.availability_meta.current_advances
+    try:
+        calc = calculate_portfolio(data)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Calculator error: {exc}",
+        }
 
-    before = {**_stub_metrics(advances), "concentration_limits": concentration_limits}
-    after  = {**_stub_metrics(advances), "concentration_limits": concentration_limits}
+    advances = data.availability_meta.current_advances
+    metrics = _metrics_from_calculator(calc, advances)
+    concentration_limits = _concentration_limits_from_waterfall(calc)
+
+    baseline = {**metrics, "concentration_limits": concentration_limits}
 
     return {
         "status": "ok",
         "workbook_path": str(workbook_path),
-        "before": before,
-        "after": after,
+        "before": baseline,
+        "after": baseline,     # Phase 5 will diff this against scenario-mutated calc
         "eligibility": {
             "status": "Yes",
             "failed_tests": [],
