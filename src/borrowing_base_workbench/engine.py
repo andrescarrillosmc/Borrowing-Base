@@ -7,9 +7,10 @@ Phase status:
   - probe_workbook():  Phases 3+4 complete — returns real asset-level results,
                        concentration waterfall, WAAR with obligor-count cap,
                        and three-test availability calculation.
-  - run_pro_forma():   Baseline "before" state uses the full calculator.
-                       "after" state is still stubbed — scenario mutation
-                       (Phase 5) not yet implemented.
+  - run_pro_forma():   Phase 5 complete — builds synthetic LoanRecord +
+                       ObligorRecord from the scenario dict, injects them into
+                       an in-memory WorkbookData copy, reruns calculate_portfolio(),
+                       and returns real before/after deltas.
 
 Return dict shapes are identical to the retired PowerShell scripts so that
 app.py requires no changes beyond the one-line import swap.
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from borrowing_base_workbench.calculator import calculate_portfolio
 from borrowing_base_workbench.loader import load_workbook_data
+from borrowing_base_workbench.scenario import build_scenario_records, inject_scenario
 
 # ---------------------------------------------------------------------------
 # Concentration limit label order
@@ -182,13 +184,33 @@ def probe_workbook(workbook_path: str | Path) -> dict:
     }
 
 
+def _eligibility_for_scenario(calc, scenario_name: str) -> dict:
+    """Extract eligibility result for the scenario loan from a PortfolioCalcResult.
+
+    Looks up the asset whose obligor_name matches the scenario company name.
+    Falls back to {"status": "Yes", "failed_tests": []} if not found.
+    """
+    for asset in calc.assets:
+        if asset.obligor_name == scenario_name:
+            e = asset.eligibility
+            status = "Yes" if e.eligible else "No"
+            return {"status": status, "failed_tests": e.failed_tests}
+    return {"status": "Yes", "failed_tests": []}
+
+
 def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
     """Run a pro forma scenario and return before/after results.
 
     Replaces: excel_runner.run_pro_forma_workbook(workbook_path, script_path, scenario)
 
-    Phase 4 status: "before" uses the full calculator (real values).
-    "after" remains identical to "before" — scenario mutation (Phase 5) pending.
+    Phase 5 complete:
+      1. Load baseline workbook data.
+      2. Compute baseline ("before") portfolio — real values.
+      3. Build synthetic LoanRecord + ObligorRecord + ManualPortfolioFlags
+         from the scenario dict.
+      4. Inject synthetic records into an in-memory WorkbookData copy.
+      5. Recompute portfolio ("after") with the scenario loan included.
+      6. Return before/after metrics + per-loan eligibility result.
 
     Return shape mirrors run_pro_forma.ps1 stdout JSON.
     """
@@ -208,32 +230,56 @@ def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
             "message": f"Failed to load workbook: {exc}",
         }
 
+    # --- Before: baseline portfolio (no scenario loan) ----------------------
     try:
-        calc = calculate_portfolio(data)
+        before_calc = calculate_portfolio(data)
     except Exception as exc:
         return {
             "status": "error",
-            "message": f"Calculator error: {exc}",
+            "message": f"Calculator error (before): {exc}",
         }
 
     advances = data.availability_meta.current_advances
-    metrics = _metrics_from_calculator(calc, advances)
-    concentration_limits = _concentration_limits_from_waterfall(calc)
+    before_metrics = _metrics_from_calculator(before_calc, advances)
+    before_conc    = _concentration_limits_from_waterfall(before_calc)
+    before_snap    = {**before_metrics, "concentration_limits": before_conc}
 
-    baseline = {**metrics, "concentration_limits": concentration_limits}
+    # --- Build and inject scenario records ----------------------------------
+    try:
+        scenario_loan, scenario_obligor, scenario_flags = build_scenario_records(scenario)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Scenario construction error: {exc}",
+        }
+
+    scenario_name = scenario_loan.obligor_name
+    after_data = inject_scenario(data, scenario_loan, scenario_obligor, scenario_flags)
+
+    # --- After: portfolio with scenario loan added --------------------------
+    try:
+        after_calc = calculate_portfolio(after_data)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Calculator error (after): {exc}",
+        }
+
+    after_metrics = _metrics_from_calculator(after_calc, advances)
+    after_conc    = _concentration_limits_from_waterfall(after_calc)
+    after_snap    = {**after_metrics, "concentration_limits": after_conc}
+
+    eligibility = _eligibility_for_scenario(after_calc, scenario_name)
 
     return {
         "status": "ok",
         "workbook_path": str(workbook_path),
-        "before": baseline,
-        "after": baseline,     # Phase 5 will diff this against scenario-mutated calc
-        "eligibility": {
-            "status": "Yes",
-            "failed_tests": [],
-        },
+        "before": before_snap,
+        "after":  after_snap,
+        "eligibility": eligibility,
         "scenario": {
-            "sm_support_row": None,
-            "loan_tape_row": None,
-            "portfolio_row": None,
+            "sm_support_row": scenario_obligor.source_row,
+            "loan_tape_row":  scenario_loan.source_row,
+            "portfolio_row":  None,
         },
     }
