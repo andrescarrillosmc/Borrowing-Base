@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
+import shutil
 import warnings
 from pathlib import Path
 from typing import Iterable
@@ -184,16 +184,13 @@ def _stage_readable_copy(workbook_path: Path) -> tuple[Path, str | None]:
         scratch_dir = Path(__file__).resolve().parents[2] / "scratch"
         scratch_dir.mkdir(parents=True, exist_ok=True)
         staged_path = scratch_dir / f"staged_{workbook_path.name}"
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            f"Copy-Item -LiteralPath '{workbook_path}' -Destination '{staged_path}' -Force",
-        ]
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-        if completed.returncode != 0:
-            raise PermissionError(f"{workbook_path} could not be copied for analysis: {completed.stderr.strip()}")
-        return staged_path, f"Workbook was analyzed from a staged copy because the source file is locked for direct Python reads."
+        try:
+            shutil.copy2(workbook_path, staged_path)
+        except OSError as exc:
+            raise PermissionError(
+                f"{workbook_path} could not be copied for analysis: {exc}"
+            ) from exc
+        return staged_path, "Workbook was analyzed from a staged copy because the source file is locked for direct Python reads."
 
 
 def analyze_workbook(workbook_path: str | Path = DEFAULT_WORKBOOK) -> WorkbookDiagnosis:

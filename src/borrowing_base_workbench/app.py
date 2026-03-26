@@ -9,7 +9,7 @@ if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from borrowing_base_workbench.analysis import DEFAULT_WORKBOOK, analyze_workbook, diagnosis_to_json, diagnosis_to_markdown
-from borrowing_base_workbench.excel_runner import probe_excel_workbook, run_pro_forma_workbook
+from borrowing_base_workbench.engine import probe_workbook as probe_excel_workbook, run_pro_forma as run_pro_forma_workbook
 from borrowing_base_workbench.validation import build_commentary, validate_scenario
 
 APP_BG = "#eef3f9"
@@ -1361,10 +1361,9 @@ class BorrowingBaseWorkbench(tk.Tk):
             if not self._current_snapshot():
                 return
 
-        script_path = Path(__file__).with_name("run_pro_forma.ps1")
         try:
-            self._show_loading_overlay("Running pro forma", "Writing the scenario to a staged workbook copy, recalculating Excel, and collecting before / after results.")
-            result = run_pro_forma_workbook(self.workbook_path.get(), script_path, values)
+            self._show_loading_overlay("Running pro forma", "Running the pro forma scenario through the Python engine and collecting before / after results.")
+            result = run_pro_forma_workbook(self.workbook_path.get(), values)
         finally:
             self._hide_loading_overlay()
         self._clear_tree(self.issue_tree)
@@ -1393,10 +1392,9 @@ class BorrowingBaseWorkbench(tk.Tk):
             self.status_text.set("Run pro forma failed.")
 
     def _probe_excel(self) -> None:
-        script_path = Path(__file__).with_name("excel_probe.ps1")
         try:
-            self._show_loading_overlay("Reading current model", "Opening the governed workbook in Excel and capturing the live baseline metrics.")
-            result = probe_excel_workbook(self.workbook_path.get(), script_path)
+            self._show_loading_overlay("Reading current model", "Reading the workbook and computing the current baseline metrics.")
+            result = probe_excel_workbook(self.workbook_path.get())
         finally:
             self._hide_loading_overlay()
         self.last_probe_result = result
