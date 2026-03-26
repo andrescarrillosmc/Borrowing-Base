@@ -1,35 +1,29 @@
 """engine.py — Python backend seam for Excel detachment (v1).
 
 This module is the execution boundary between the Tkinter frontend and the
-backend calculation logic.  In this initial phase the two public functions
-return deterministic stub responses that satisfy every UI rendering path in
-app.py.  No Excel, no PowerShell, no subprocess.
+backend calculation logic.
 
-Replacement target:
-    app.py previously imported from excel_runner.py:
-        probe_excel_workbook(workbook_path, script_path) -> dict
-        run_pro_forma_workbook(workbook_path, script_path, scenario) -> dict
+Phase status:
+  - probe_workbook():  loads workbook data via loader.py; metrics are STUBBED
+                       (zeroed) until calculator.py is implemented in Phase 3.
+  - run_pro_forma():   validates workbook path; metrics are STUBBED until
+                       calculator.py is implemented.
 
-    app.py now imports from this module:
-        probe_workbook(workbook_path) -> dict
-        run_pro_forma(workbook_path, scenario) -> dict
-
-    The script_path argument is gone; it was only needed to locate the
-    PowerShell file.  The return dict shapes are identical to the PS scripts.
-
-Next phase: replace the stub bodies with loader.py + calculator.py calls.
+The return dict shapes are identical to the retired PowerShell scripts so that
+app.py requires no changes beyond the one-line import swap.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from borrowing_base_workbench.loader import load_workbook_data
+
 # ---------------------------------------------------------------------------
-# Concentration limit metadata
+# Concentration limit label order
 # ---------------------------------------------------------------------------
-# The 13 tests in the exact order expected by the frontend (limit_type strings
-# are matched by key in app.py._populate_results_view).
-# limit_percent values come from AGENT!D57-D69.
+# limit_type strings are matched by key in app.py._populate_results_view —
+# they must be exactly these strings, in this order.
 # ---------------------------------------------------------------------------
 
 _CONCENTRATION_TESTS = [
@@ -49,8 +43,8 @@ _CONCENTRATION_TESTS = [
 ]
 
 
-def _stub_metrics() -> dict:
-    """Return zeroed-out metric placeholders matching the probe output shape."""
+def _stub_metrics(current_advances: float = 0.0) -> dict:
+    """Zeroed metric placeholders. Replaced by calculator.py in Phase 3."""
     return {
         "availability": 0.0,
         "total_portfolio_par": 0.0,
@@ -59,16 +53,46 @@ def _stub_metrics() -> dict:
         "net_adjusted_bv": 0.0,
         "credit_enhancement_test": "",
         "weighted_avg_advance_rate": 0.0,
-        "current_advances": 0.0,
+        "current_advances": current_advances,
     }
 
 
-def _stub_concentration_limits() -> list[dict]:
-    """Return 13 zeroed concentration limit rows matching the probe output shape."""
+def _stub_concentration_limits(policy_limits: list[dict] | None = None) -> list[dict]:
+    """13 concentration limit rows with live policy percentages, zeroed actuals."""
+    source = policy_limits if policy_limits is not None else _CONCENTRATION_TESTS
     return [
         {
             "limit_type": t["limit_type"],
             "limit_percent": t["limit_percent"],
+            "applicable_limit": 0.0,
+            "actual": 0.0,
+            "excess": 0.0,
+        }
+        for t in source
+    ]
+
+
+def _concentration_limits_from_policy(policy) -> list[dict]:
+    """Build the 13-row concentration limit list from loaded PolicyConfig."""
+    pct_map = {
+        "Max Second Lien & FILO with senior lev >= 1.50x": policy.conc_max_2l_filo_high_lev,
+        "Max Second Lien":                                  policy.conc_max_second_lien,
+        "Max Non-First Lien":                               policy.conc_max_non_first_lien,
+        "Max EBITDA < $5MM":                                policy.conc_max_small_ebitda,
+        "Max Obligors":                                     policy.conc_max_obligor,
+        "Max Largest Industry":                             policy.conc_max_largest_industry,
+        "Max Second Largest Industry":                      policy.conc_max_second_industry,
+        "Max Other Industries":                             policy.conc_max_other_industries,
+        "Fixed Rate":                                       policy.conc_fixed_rate,
+        "Max Limited Industry":                             policy.conc_limited_industry,
+        "Max DDTL and Revolver":                            policy.conc_max_ddtl_revolver,
+        "Max Non-Sponsor/Non-Family Office":                policy.conc_max_non_sponsor,
+        "Max Div Recap Non-Sponsor/Non-Family Office":      policy.conc_max_div_recap,
+    }
+    return [
+        {
+            "limit_type": t["limit_type"],
+            "limit_percent": pct_map.get(t["limit_type"], t["limit_percent"]),
             "applicable_limit": 0.0,
             "actual": 0.0,
             "excess": 0.0,
@@ -86,18 +110,12 @@ def probe_workbook(workbook_path: str | Path) -> dict:
 
     Replaces: excel_runner.probe_excel_workbook(workbook_path, script_path)
 
-    Current implementation: stub.  Returns a valid response shape with zeroed
-    numeric values so that the Results and Admin tabs render without errors.
+    Phase 2 status: loads workbook data via loader.py; populates policy-driven
+    concentration limit percentages and current_advances from the workbook.
+    All computed metrics (availability, ABV, etc.) remain STUBBED at 0.0
+    until calculator.py is implemented in Phase 3.
 
-    Next phase: load WorkbookData via loader.py, run calculator.py on the
-    baseline portfolio, and return the computed values.
-
-    Return shape mirrors excel_probe.ps1 stdout JSON:
-        {
-            "status": "ok",
-            "metrics": { 8 keys },
-            "concentration_limits": [ 13 dicts ]
-        }
+    Return shape mirrors excel_probe.ps1 stdout JSON.
     """
     workbook_path = Path(workbook_path)
 
@@ -108,35 +126,36 @@ def probe_workbook(workbook_path: str | Path) -> dict:
             "remediation": "Check the workbook path in the Admin tab and try again.",
         }
 
+    try:
+        data = load_workbook_data(workbook_path)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Failed to load workbook: {exc}",
+            "remediation": "Ensure the workbook is accessible and not exclusively locked.",
+        }
+
+    metrics = _stub_metrics(current_advances=data.availability_meta.current_advances)
+    concentration_limits = _concentration_limits_from_policy(data.policy)
+
     return {
         "status": "ok",
         "workbook_path": str(workbook_path),
-        "metrics": _stub_metrics(),
-        "concentration_limits": _stub_concentration_limits(),
+        "loader_summary": data.summary(),  # extra field — ignored by frontend, useful for debug
+        "metrics": metrics,
+        "concentration_limits": concentration_limits,
     }
 
 
 def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
-    """Run a pro forma scenario against the workbook and return before/after results.
+    """Run a pro forma scenario and return before/after results.
 
     Replaces: excel_runner.run_pro_forma_workbook(workbook_path, script_path, scenario)
 
-    Current implementation: stub.  Returns a valid response shape with zeroed
-    numeric values and a passing eligibility result so that all Results tab
-    sections render without errors.
+    Phase 2 status: loads workbook data; all computed metrics STUBBED at 0.0
+    until calculator.py is implemented in Phase 3.
 
-    Next phase: load WorkbookData via loader.py, build a synthetic LoanRecord
-    from `scenario`, run calculator.py on baseline (before) and on
-    baseline + scenario loan (after), and return the delta.
-
-    Return shape mirrors run_pro_forma.ps1 stdout JSON:
-        {
-            "status": "ok",
-            "before": { metrics + concentration_limits },
-            "after":  { metrics + concentration_limits },
-            "eligibility": { "status": str, "failed_tests": list },
-            "scenario": { row numbers (informational) }
-        }
+    Return shape mirrors run_pro_forma.ps1 stdout JSON.
     """
     workbook_path = Path(workbook_path)
 
@@ -146,8 +165,19 @@ def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
             "message": f"Workbook not found: {workbook_path}",
         }
 
-    before = {**_stub_metrics(), "concentration_limits": _stub_concentration_limits()}
-    after  = {**_stub_metrics(), "concentration_limits": _stub_concentration_limits()}
+    try:
+        data = load_workbook_data(workbook_path)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Failed to load workbook: {exc}",
+        }
+
+    concentration_limits = _concentration_limits_from_policy(data.policy)
+    advances = data.availability_meta.current_advances
+
+    before = {**_stub_metrics(advances), "concentration_limits": concentration_limits}
+    after  = {**_stub_metrics(advances), "concentration_limits": concentration_limits}
 
     return {
         "status": "ok",
