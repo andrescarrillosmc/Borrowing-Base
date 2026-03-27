@@ -1,19 +1,14 @@
-"""engine.py — Python backend seam for Excel detachment (v1).
+"""engine.py — Python calculation backend for the Borrowing Base Workbench.
 
-This module is the execution boundary between the Tkinter frontend and the
-backend calculation logic.
+This module is the execution boundary between the Tkinter frontend (app.py)
+and the pure-Python calculation stack (loader → calculator → scenario).
 
-Phase status:
-  - probe_workbook():  Phases 3+4 complete — returns real asset-level results,
-                       concentration waterfall, WAAR with obligor-count cap,
-                       and three-test availability calculation.
-  - run_pro_forma():   Phase 5 complete — builds synthetic LoanRecord +
-                       ObligorRecord from the scenario dict, injects them into
-                       an in-memory WorkbookData copy, reruns calculate_portfolio(),
-                       and returns real before/after deltas.
+Public API:
+  probe_workbook(workbook_path)           — baseline portfolio metrics
+  run_pro_forma(workbook_path, scenario)  — before/after pro forma scenario
 
-Return dict shapes are identical to the retired PowerShell scripts so that
-app.py requires no changes beyond the one-line import swap.
+The workbook is used as a read-only data source only; no Excel runtime,
+COM automation, or PowerShell is involved.
 """
 
 from __future__ import annotations
@@ -136,12 +131,8 @@ def _policy_pct_map(calc) -> dict[str, float]:
 def probe_workbook(workbook_path: str | Path) -> dict:
     """Read the current baseline state of the portfolio from the workbook.
 
-    Replaces: excel_runner.probe_excel_workbook(workbook_path, script_path)
-
-    Phase 4 complete: returns real values for all core metrics including
-    availability, net ABV, WAAR (with cap), and concentration test details.
-
-    Return shape mirrors excel_probe.ps1 stdout JSON.
+    Returns real values for all core metrics including availability, net ABV,
+    WAAR (with obligor-count cap), and concentration test details.
     """
     workbook_path = Path(workbook_path)
 
@@ -201,18 +192,14 @@ def _eligibility_for_scenario(calc, scenario_name: str) -> dict:
 def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
     """Run a pro forma scenario and return before/after results.
 
-    Replaces: excel_runner.run_pro_forma_workbook(workbook_path, script_path, scenario)
-
-    Phase 5 complete:
+    Executes a pro forma scenario against the current portfolio:
       1. Load baseline workbook data.
-      2. Compute baseline ("before") portfolio — real values.
+      2. Compute baseline ("before") portfolio.
       3. Build synthetic LoanRecord + ObligorRecord + ManualPortfolioFlags
          from the scenario dict.
       4. Inject synthetic records into an in-memory WorkbookData copy.
       5. Recompute portfolio ("after") with the scenario loan included.
       6. Return before/after metrics + per-loan eligibility result.
-
-    Return shape mirrors run_pro_forma.ps1 stdout JSON.
     """
     workbook_path = Path(workbook_path)
 

@@ -1,38 +1,79 @@
 # Borrowing Base Workbench
 
-Desktop scaffold for turning `Borrowing_Base_v8` into a standalone operator app.
+Desktop application for Star Mountain Capital's BDC borrowing base model.
+Reads the Excel workbook as a data source and computes all portfolio metrics
+in pure Python — no Excel runtime, no COM automation, no PowerShell.
 
-## What it does now
+## What it does
 
-- Diagnoses the workbook structure from the live spreadsheet.
-- Parses the `MAPPING_LAYER` into app-ready input, output, validation, and write-policy metadata.
-- Surfaces the monthly operator checklist for the tabs most likely to change.
-- Provides a deal-team scenario form driven by the workbook's own mapping sheet.
-- Runs pre-flight validation and commentary for a pro forma scenario.
-- Probes Excel automation so the app can eventually use the workbook itself as the calculation engine.
+- **Baseline probe** — reads the current workbook state and computes availability,
+  WAAR, concentration waterfall, and per-asset eligibility
+- **Pro forma scenario** — adds a synthetic loan to an in-memory copy of the
+  portfolio and shows before/after delta across all metrics
+- **Pre-flight validation** — checks workbook health and surfaces commentary
+  before running calculations
+- **Workbook diagnostics** — parses `MAPPING_LAYER` into structured metadata
 
-## Current constraint
+## Architecture
 
-The app now targets the trusted workbook saved in the product folder:
+```
+app.py  (Tkinter UI)
+  └── engine.py  (backend boundary)
+        ├── loader.py      reads workbook via openpyxl — no Excel required
+        ├── calculator.py  eligibility tests, advance rates, concentration waterfall, WAAR
+        └── scenario.py    constructs synthetic LoanRecord/ObligorRecord for pro forma runs
+```
 
-`C:\Users\Andres.Carrillo\OneDrive - Star Mountain Capital\03_Operations\01_Financial\Borrowing_Base\Product\2025-02-11_BDC Borrowing_Base_v8.xlsx`
-
-Current implication:
-
-- The analyzer, admin panel, scenario form, and live-model read path are working.
-- The app still does not write scenario rows back into workbook copies, so the full governed pro forma execution path is not enabled yet.
-- `Read Current Model` is read-only. `Clear Scenario` only resets the UI.
+See [docs/architecture.md](docs/architecture.md) for a detailed walkthrough.
 
 ## Run
-
-From this folder:
 
 ```powershell
 python .\src\borrowing_base_workbench\app.py
 ```
 
-Or use:
+Or:
 
 ```powershell
 .\run_app.bat
 ```
+
+The workbook path is set in the Admin tab on first run.
+
+## Tests
+
+```powershell
+# From the repo root
+cd C:\Users\henry.yan\borrowing-base
+PYTHONPATH=src python tests/test_engine.py
+```
+
+96 tests covering eligibility logic, collateral tier bucketing, advance rate
+selection, VAE handling, scenario injection, and end-to-end integration.
+Integration tests skip automatically if the workbook file is absent.
+
+## Parity validation
+
+```powershell
+PYTHONPATH=src python tests/validate_parity.py
+```
+
+Compares all engine outputs against known-good reference values.
+See [parity_report.md](parity_report.md) for results.
+
+## Workbook
+
+The app reads (never writes) the Excel workbook:
+
+`2025-02-11_BDC Borrowing_Base_v8.xlsm`
+
+Sheets used: `Loan Tape - Settled`, `SM Support`, `AGENT`, `VAE Log`,
+`CL` (concentration limits), `Availability`.
+
+## Docs
+
+| File | Contents |
+|------|----------|
+| [docs/architecture.md](docs/architecture.md) | System design, module responsibilities, data flow |
+| [parity_report.md](parity_report.md) | Validation results — engine vs reference values |
+| [docs/merge_prep.md](docs/merge_prep.md) | Branch change summary and merge recommendation |
