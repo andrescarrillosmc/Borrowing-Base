@@ -25,6 +25,8 @@ def _resolve_default_workbook() -> Path:
         Path(r"C:\Users\Andres.Carrillo\OneDrive - Star Mountain Capital\03_Operations\01_Financial\Borrowing_Base\Product\2025-02-11_BDC Borrowing_Base_v8.xlsm"),
         Path(r"C:\Users\Andres.Carrillo\Downloads\2025-02-11_BDC Borrowing_Base_v8.xlsx"),
         Path(r"C:\Users\Andres.Carrillo\Downloads\2025-02-11_BDC Borrowing_Base_v8.xlsm"),
+        Path(r"C:\Users\henry.yan\borrowing-base\Borrowing_Base.xlsx"),
+        Path(r"C:\Users\henry.yan\borrowing-base\Borrowing_Base.xlsx"),
     ]
     for candidate in candidates:
         if candidate.exists():
