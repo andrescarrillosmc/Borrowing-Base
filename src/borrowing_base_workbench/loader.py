@@ -34,7 +34,7 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from openpyxl import load_workbook as _openpyxl_load
 
@@ -322,7 +322,8 @@ class AvailabilityMeta:
 class WorkbookData:
     """Top-level container for all workbook-backed data.
 
-    Returned by load_workbook_data(). This is the input to engine.py.
+    Returned by load_workbook_data(). Kept for backward compatibility with
+    existing code and tests. Prefer RuntimeData for new code.
     """
     workbook_path: str
     loans: list[LoanRecord]
@@ -365,6 +366,79 @@ class WorkbookData:
             "industry_taxonomy_count": len(self.policy.industry_taxonomy),
             "limited_industries": self.policy.limited_industries,
         }
+
+
+@dataclass
+class RuntimeData:
+    """In-memory session state loaded from a workbook import.
+
+    Created once by load_workbook(). After creation there is no dependency
+    on the source file — all portfolio data is held in Python objects.
+
+    Baseline calculations and scenario runs both operate on RuntimeData
+    directly (via probe_runtime / run_pro_forma_on_runtime in engine.py).
+    Scenario injection returns a new RuntimeData copy; the original is
+    never mutated.
+    """
+    source_path: Path               # file the data was loaded from
+    imported_at: datetime           # timestamp of import
+    loans: list[LoanRecord]
+    obligors: list[ObligorRecord]
+    vaes: list[VaeRecord]
+    portfolio_flags: dict[str, ManualPortfolioFlags]   # keyed by obligor_name
+    policy: PolicyConfig
+    availability_meta: AvailabilityMeta
+
+    # ------------------------------------------------------------------
+    # Convenience accessors (mirror WorkbookData interface)
+    # ------------------------------------------------------------------
+
+    def obligor_by_name(self, name: str) -> ObligorRecord | None:
+        for o in self.obligors:
+            if o.obligor_name == name:
+                return o
+        return None
+
+    def vaes_for(self, obligor_name: str) -> list[VaeRecord]:
+        return [v for v in self.vaes if v.borrower == obligor_name]
+
+    def flags_for(self, obligor_name: str) -> ManualPortfolioFlags:
+        return self.portfolio_flags.get(
+            obligor_name,
+            ManualPortfolioFlags(
+                obligor_name=obligor_name,
+                limited_industry=False, non_sponsor=False, div_recap=False,
+                is_dip=False, agent_addback_discretion=False,
+                agent_post_inclusion_haircut=False, agent_addback_haircut_pct=None,
+            ),
+        )
+
+    def summary(self) -> dict:
+        return {
+            "source_path": str(self.source_path),
+            "imported_at": self.imported_at.isoformat(),
+            "loan_count": len(self.loans),
+            "obligor_count": len(self.obligors),
+            "vae_count": len(self.vaes),
+            "portfolio_flags_count": len(self.portfolio_flags),
+            "facility_amount": self.availability_meta.facility_amount,
+            "current_advances": self.availability_meta.current_advances,
+            "measurement_date": str(self.availability_meta.measurement_date),
+            "industry_taxonomy_count": len(self.policy.industry_taxonomy),
+            "limited_industries": self.policy.limited_industries,
+        }
+
+    def to_workbook_data(self) -> WorkbookData:
+        """Convert to WorkbookData for compatibility with legacy helpers."""
+        return WorkbookData(
+            workbook_path=str(self.source_path),
+            loans=self.loans,
+            obligors=self.obligors,
+            vaes=self.vaes,
+            portfolio_flags=self.portfolio_flags,
+            policy=self.policy,
+            availability_meta=self.availability_meta,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -684,6 +758,34 @@ def load_workbook_data(workbook_path: str | Path) -> WorkbookData:
         portfolio_flags=flags,
         policy=policy,
         availability_meta=meta,
+    )
+
+
+def load_workbook(workbook_path: str | Path) -> RuntimeData:
+    """Import a workbook once into in-memory RuntimeData.
+
+    This is the preferred entry point for all runtime use. After this call
+    the file is no longer required — all portfolio data lives in Python
+    objects. Pass the returned RuntimeData to probe_runtime() or
+    run_pro_forma_on_runtime() in engine.py.
+
+    Args:
+        workbook_path: path to the .xlsx or .xlsm workbook file
+
+    Returns:
+        RuntimeData with no further file dependency
+    """
+    workbook_path = Path(workbook_path)
+    wd = load_workbook_data(workbook_path)
+    return RuntimeData(
+        source_path=workbook_path,
+        imported_at=datetime.now(),
+        loans=wd.loans,
+        obligors=wd.obligors,
+        vaes=wd.vaes,
+        portfolio_flags=wd.portfolio_flags,
+        policy=wd.policy,
+        availability_meta=wd.availability_meta,
     )
 
 

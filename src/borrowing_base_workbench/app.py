@@ -9,7 +9,12 @@ if __package__ in (None, ""):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from borrowing_base_workbench.analysis import DEFAULT_WORKBOOK, analyze_workbook, diagnosis_to_json, diagnosis_to_markdown
-from borrowing_base_workbench.engine import probe_workbook as probe_excel_workbook, run_pro_forma as run_pro_forma_workbook
+from borrowing_base_workbench.engine import (
+    import_workbook,
+    probe_runtime,
+    run_pro_forma_on_runtime,
+)
+from borrowing_base_workbench.loader import RuntimeData
 from borrowing_base_workbench.validation import build_commentary, validate_scenario
 
 APP_BG = "#eef3f9"
@@ -105,6 +110,7 @@ class BorrowingBaseWorkbench(tk.Tk):
         self.workbook_path = tk.StringVar(value=str(DEFAULT_WORKBOOK))
         self.status_text = tk.StringVar(value="Select the governed workbook, enter a scenario, and run the pro forma.")
         self.diagnosis = None
+        self.runtime_data: RuntimeData | None = None   # in-memory session state
         self.form_vars: dict[str, tk.StringVar] = {}
         self.last_probe_result: dict | None = None
         self._loading_overlay: tk.Toplevel | None = None
@@ -1035,13 +1041,24 @@ class BorrowingBaseWorkbench(tk.Tk):
 
     def _load_workbook(self) -> None:
         try:
-            self._show_loading_overlay("Loading workbook", "Reading the governed workbook structure and refreshing the app surfaces.")
+            self._show_loading_overlay("Loading workbook", "Reading the governed workbook and importing portfolio data into session state.")
             self.diagnosis = analyze_workbook(self.workbook_path.get())
         except Exception as exc:
             self._hide_loading_overlay()
             messagebox.showerror("Load workbook", str(exc))
             self.status_text.set(f"Workbook load failed: {exc}")
             return
+
+        # Import portfolio data into in-memory RuntimeData so baseline and
+        # scenario runs do not require the file again until explicitly refreshed.
+        runtime_result = import_workbook(self.workbook_path.get())
+        if isinstance(runtime_result, dict):
+            # import_workbook returns an error dict on failure
+            self._hide_loading_overlay()
+            messagebox.showerror("Load workbook", runtime_result.get("message", "Import failed"))
+            self.status_text.set("Workbook import failed.")
+            return
+        self.runtime_data = runtime_result
 
         self.last_probe_result = None
         self._clear_results_panel()
@@ -1361,9 +1378,12 @@ class BorrowingBaseWorkbench(tk.Tk):
             if not self._current_snapshot():
                 return
 
+        if self.runtime_data is None:
+            messagebox.showerror("Run pro forma", "No workbook loaded. Load a workbook first.")
+            return
         try:
-            self._show_loading_overlay("Running pro forma", "Running the pro forma scenario through the Python engine and collecting before / after results.")
-            result = run_pro_forma_workbook(self.workbook_path.get(), values)
+            self._show_loading_overlay("Running pro forma", "Running the pro forma scenario on the imported portfolio state.")
+            result = run_pro_forma_on_runtime(self.runtime_data, values)
         finally:
             self._hide_loading_overlay()
         self._clear_tree(self.issue_tree)
@@ -1374,7 +1394,7 @@ class BorrowingBaseWorkbench(tk.Tk):
             before_snapshot = dict(result.get("before", {}))
             after_snapshot = dict(result.get("after", {}))
             commentary = build_commentary(values, issues)
-            commentary += "\nThe pro forma was run on a staged workbook copy, so the master workbook was not changed."
+            commentary += "\nThe pro forma ran entirely in memory. The workbook file was not modified."
             self._populate_results_view(
                 values,
                 commentary,
@@ -1384,7 +1404,7 @@ class BorrowingBaseWorkbench(tk.Tk):
                 banner="Pro forma completed. Compare the current borrowing base against the staged scenario below.",
             )
             self.notebook.select(self.results_tab)
-            self.status_text.set("Pro forma completed on a staged workbook copy.")
+            self.status_text.set("Pro forma completed.")
         else:
             lines = ["Run Pro Forma failed.", "", result.get("message", "Unknown error")]
             self._show_results_message("Run Pro Forma failed.", "\n".join(lines))
@@ -1392,9 +1412,12 @@ class BorrowingBaseWorkbench(tk.Tk):
             self.status_text.set("Run pro forma failed.")
 
     def _probe_excel(self) -> None:
+        if self.runtime_data is None:
+            messagebox.showerror("Read current model", "No workbook loaded. Load a workbook first.")
+            return
         try:
-            self._show_loading_overlay("Reading current model", "Reading the workbook and computing the current baseline metrics.")
-            result = probe_excel_workbook(self.workbook_path.get())
+            self._show_loading_overlay("Reading current model", "Computing baseline metrics from imported portfolio state.")
+            result = probe_runtime(self.runtime_data)
         finally:
             self._hide_loading_overlay()
         self.last_probe_result = result

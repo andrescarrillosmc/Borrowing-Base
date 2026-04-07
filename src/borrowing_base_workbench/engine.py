@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from borrowing_base_workbench.calculator import calculate_portfolio
-from borrowing_base_workbench.loader import load_workbook_data
+from borrowing_base_workbench.loader import RuntimeData, load_workbook, load_workbook_data
 from borrowing_base_workbench.scenario import build_scenario_records, inject_scenario
 
 # ---------------------------------------------------------------------------
@@ -125,26 +125,38 @@ def _policy_pct_map(calc) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Internal helpers
 # ---------------------------------------------------------------------------
 
-def probe_workbook(workbook_path: str | Path) -> dict:
-    """Read the current baseline state of the portfolio from the workbook.
+def _eligibility_for_scenario(calc, scenario_name: str) -> dict:
+    """Extract eligibility result for the scenario loan from a PortfolioCalcResult."""
+    for asset in calc.assets:
+        if asset.obligor_name == scenario_name:
+            e = asset.eligibility
+            return {"status": "Yes" if e.eligible else "No", "failed_tests": e.failed_tests}
+    return {"status": "Yes", "failed_tests": []}
 
-    Returns real values for all core metrics including availability, net ABV,
-    WAAR (with obligor-count cap), and concentration test details.
+
+# ---------------------------------------------------------------------------
+# Session-aware public API  (preferred — no file I/O after import)
+# ---------------------------------------------------------------------------
+
+def import_workbook(workbook_path: str | Path) -> RuntimeData | dict:
+    """Load the workbook once into in-memory RuntimeData.
+
+    Returns RuntimeData on success, or an error dict on failure.
+    After a successful return the file is no longer required.
+    Pass the result to probe_runtime() or run_pro_forma_on_runtime().
     """
     workbook_path = Path(workbook_path)
-
     if not workbook_path.exists():
         return {
             "status": "error",
             "message": f"Workbook not found: {workbook_path}",
             "remediation": "Check the workbook path in the Admin tab and try again.",
         }
-
     try:
-        data = load_workbook_data(workbook_path)
+        return load_workbook(workbook_path)
     except Exception as exc:
         return {
             "status": "error",
@@ -152,121 +164,112 @@ def probe_workbook(workbook_path: str | Path) -> dict:
             "remediation": "Ensure the workbook is accessible and not exclusively locked.",
         }
 
+
+def probe_runtime(runtime: RuntimeData) -> dict:
+    """Compute baseline portfolio metrics from pre-loaded RuntimeData.
+
+    No file I/O. Uses only in-memory state. Safe to call repeatedly
+    without re-reading the workbook.
+    """
+    data = runtime.to_workbook_data()
     try:
         calc = calculate_portfolio(data)
     except Exception as exc:
-        return {
-            "status": "error",
-            "message": f"Calculator error: {exc}",
-            "remediation": "Check calculator.py for data issues.",
-        }
+        return {"status": "error", "message": f"Calculator error: {exc}"}
 
-    advances = data.availability_meta.current_advances
-    metrics = _metrics_from_calculator(calc, advances)
-    concentration_limits = _concentration_limits_from_waterfall(calc)
-
+    advances = runtime.availability_meta.current_advances
     return {
         "status": "ok",
-        "workbook_path": str(workbook_path),
-        "loader_summary": data.summary(),       # ignored by frontend, useful for debug
-        "calculator_summary": calc.summary(),   # Phase 4 summary
-        "metrics": metrics,
-        "concentration_limits": concentration_limits,
+        "source_path": str(runtime.source_path),
+        "imported_at": runtime.imported_at.isoformat(),
+        "loader_summary": runtime.summary(),
+        "calculator_summary": calc.summary(),
+        "metrics": _metrics_from_calculator(calc, advances),
+        "concentration_limits": _concentration_limits_from_waterfall(calc),
     }
 
 
-def _eligibility_for_scenario(calc, scenario_name: str) -> dict:
-    """Extract eligibility result for the scenario loan from a PortfolioCalcResult.
+def run_pro_forma_on_runtime(runtime: RuntimeData, scenario: dict) -> dict:
+    """Run a pro forma scenario on pre-loaded RuntimeData.
 
-    Looks up the asset whose obligor_name matches the scenario company name.
-    Falls back to {"status": "Yes", "failed_tests": []} if not found.
+    No workbook re-read. Uses the cached portfolio state as the baseline,
+    injects the scenario loan into an in-memory copy, and returns
+    before/after metric snapshots + per-loan eligibility result.
+
+    The original RuntimeData is never mutated.
     """
-    for asset in calc.assets:
-        if asset.obligor_name == scenario_name:
-            e = asset.eligibility
-            status = "Yes" if e.eligible else "No"
-            return {"status": status, "failed_tests": e.failed_tests}
-    return {"status": "Yes", "failed_tests": []}
+    data = runtime.to_workbook_data()
+    advances = runtime.availability_meta.current_advances
 
-
-def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
-    """Run a pro forma scenario and return before/after results.
-
-    Executes a pro forma scenario against the current portfolio:
-      1. Load baseline workbook data.
-      2. Compute baseline ("before") portfolio.
-      3. Build synthetic LoanRecord + ObligorRecord + ManualPortfolioFlags
-         from the scenario dict.
-      4. Inject synthetic records into an in-memory WorkbookData copy.
-      5. Recompute portfolio ("after") with the scenario loan included.
-      6. Return before/after metrics + per-loan eligibility result.
-    """
-    workbook_path = Path(workbook_path)
-
-    if not workbook_path.exists():
-        return {
-            "status": "error",
-            "message": f"Workbook not found: {workbook_path}",
-        }
-
-    try:
-        data = load_workbook_data(workbook_path)
-    except Exception as exc:
-        return {
-            "status": "error",
-            "message": f"Failed to load workbook: {exc}",
-        }
-
-    # --- Before: baseline portfolio (no scenario loan) ----------------------
+    # --- Before: baseline portfolio -----------------------------------------
     try:
         before_calc = calculate_portfolio(data)
     except Exception as exc:
-        return {
-            "status": "error",
-            "message": f"Calculator error (before): {exc}",
-        }
+        return {"status": "error", "message": f"Calculator error (before): {exc}"}
 
-    advances = data.availability_meta.current_advances
-    before_metrics = _metrics_from_calculator(before_calc, advances)
-    before_conc    = _concentration_limits_from_waterfall(before_calc)
-    before_snap    = {**before_metrics, "concentration_limits": before_conc}
+    before_snap = {
+        **_metrics_from_calculator(before_calc, advances),
+        "concentration_limits": _concentration_limits_from_waterfall(before_calc),
+    }
 
     # --- Build and inject scenario records ----------------------------------
     try:
         scenario_loan, scenario_obligor, scenario_flags = build_scenario_records(scenario)
     except Exception as exc:
-        return {
-            "status": "error",
-            "message": f"Scenario construction error: {exc}",
-        }
+        return {"status": "error", "message": f"Scenario construction error: {exc}"}
 
     scenario_name = scenario_loan.obligor_name
     after_data = inject_scenario(data, scenario_loan, scenario_obligor, scenario_flags)
 
-    # --- After: portfolio with scenario loan added --------------------------
+    # --- After: portfolio with scenario loan --------------------------------
     try:
         after_calc = calculate_portfolio(after_data)
     except Exception as exc:
-        return {
-            "status": "error",
-            "message": f"Calculator error (after): {exc}",
-        }
+        return {"status": "error", "message": f"Calculator error (after): {exc}"}
 
-    after_metrics = _metrics_from_calculator(after_calc, advances)
-    after_conc    = _concentration_limits_from_waterfall(after_calc)
-    after_snap    = {**after_metrics, "concentration_limits": after_conc}
-
-    eligibility = _eligibility_for_scenario(after_calc, scenario_name)
+    after_snap = {
+        **_metrics_from_calculator(after_calc, advances),
+        "concentration_limits": _concentration_limits_from_waterfall(after_calc),
+    }
 
     return {
         "status": "ok",
-        "workbook_path": str(workbook_path),
+        "source_path": str(runtime.source_path),
         "before": before_snap,
         "after":  after_snap,
-        "eligibility": eligibility,
+        "eligibility": _eligibility_for_scenario(after_calc, scenario_name),
         "scenario": {
             "sm_support_row": scenario_obligor.source_row,
             "loan_tape_row":  scenario_loan.source_row,
             "portfolio_row":  None,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrappers (load + run in one call — for backward compat / tests)
+# ---------------------------------------------------------------------------
+
+def probe_workbook(workbook_path: str | Path) -> dict:
+    """Load workbook and return baseline metrics.
+
+    Convenience wrapper around import_workbook() + probe_runtime().
+    Prefer storing the RuntimeData from import_workbook() and calling
+    probe_runtime() directly to avoid repeated file reads.
+    """
+    result = import_workbook(workbook_path)
+    if isinstance(result, dict):
+        return result
+    return probe_runtime(result)
+
+
+def run_pro_forma(workbook_path: str | Path, scenario: dict) -> dict:
+    """Load workbook and run a pro forma scenario.
+
+    Convenience wrapper around import_workbook() + run_pro_forma_on_runtime().
+    Prefer pre-loading with import_workbook() when running multiple scenarios.
+    """
+    result = import_workbook(workbook_path)
+    if isinstance(result, dict):
+        return result
+    return run_pro_forma_on_runtime(result, scenario)
