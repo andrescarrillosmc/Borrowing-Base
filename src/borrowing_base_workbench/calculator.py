@@ -44,6 +44,36 @@ from borrowing_base_workbench.loader import (
 
 
 # ---------------------------------------------------------------------------
+# Concentration test registry
+# ---------------------------------------------------------------------------
+# Single source of truth for the 13 concentration test labels and their
+# corresponding PolicyConfig field names. Both the waterfall (calculator.py)
+# and the results view (engine.py) reference this list — eliminating the
+# implicit string-matching fragility between the two modules.
+
+CONCENTRATION_TESTS: list[tuple[str, str]] = [
+    ("Max Second Lien & FILO with senior lev >= 1.50x", "conc_max_2l_filo_high_lev"),
+    ("Max Second Lien",                                  "conc_max_second_lien"),
+    ("Max Non-First Lien",                               "conc_max_non_first_lien"),
+    ("Max EBITDA < $5MM",                                "conc_max_small_ebitda"),
+    ("Max Obligors",                                     "conc_max_obligor"),
+    ("Max Largest Industry",                             "conc_max_largest_industry"),
+    ("Max Second Largest Industry",                      "conc_max_second_industry"),
+    ("Max Other Industries",                             "conc_max_other_industries"),
+    ("Fixed Rate",                                       "conc_fixed_rate"),
+    ("Max Limited Industry",                             "conc_limited_industry"),
+    ("Max DDTL and Revolver",                            "conc_max_ddtl_revolver"),
+    ("Max Non-Sponsor/Non-Family Office",                "conc_max_non_sponsor"),
+    ("Max Div Recap Non-Sponsor/Non-Family Office",      "conc_max_div_recap"),
+]
+"""Ordered list of (label, policy_field) for all 13 concentration tests.
+
+`label` is the display string used in waterfall results and the UI.
+`policy_field` is the attribute name on PolicyConfig holding the limit percentage.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Eligibility
 # ---------------------------------------------------------------------------
 
@@ -498,6 +528,26 @@ class PortfolioCalcResult:
 
 
 # ---------------------------------------------------------------------------
+# VAE helpers
+# ---------------------------------------------------------------------------
+
+def _select_active_vae(vaes: list[VaeRecord]) -> float | None:
+    """Return the agent-assigned value from the most recent VAE with a non-None value.
+
+    Edge cases:
+    - No VAEs at all → None (no override applied)
+    - VAEs exist but none have an assigned value → None
+    - vae_date is None → treated as date.min (sorted last among dated records,
+      so a dated VAE always wins over an undated one)
+    """
+    vaes_with_value = [v for v in vaes if v.vae_agent_assigned_value is not None]
+    if not vaes_with_value:
+        return None
+    most_recent = max(vaes_with_value, key=lambda v: v.vae_date or date.min)
+    return most_recent.vae_agent_assigned_value
+
+
+# ---------------------------------------------------------------------------
 # Core computation functions
 # ---------------------------------------------------------------------------
 
@@ -516,12 +566,7 @@ def calculate_asset(loan: LoanRecord, data: WorkbookData) -> AssetCalcResult:
     collateral_tier_value = tier_pct * loan.olb
 
     # --- VAE: find most recent record with a non-None assigned value ---
-    vaes_with_value = [v for v in vaes if v.vae_agent_assigned_value is not None]
-    if vaes_with_value:
-        most_recent = max(vaes_with_value, key=lambda v: v.vae_date or date.min)
-        vae_assigned = most_recent.vae_agent_assigned_value
-    else:
-        vae_assigned = None
+    vae_assigned = _select_active_vae(vaes)
     has_vae = bool(vaes)
 
     # --- Pre-concentration assigned value ---
@@ -608,22 +653,8 @@ def _run_waterfall(
 
     if total_abv <= 0:
         zero_tests = [
-            ConcentrationTestResult(name, pct, 0.0, 0.0, 0.0)
-            for name, pct in [
-                ("Max Second Lien & FILO with senior lev >= 1.50x", policy.conc_max_2l_filo_high_lev),
-                ("Max Second Lien",                                  policy.conc_max_second_lien),
-                ("Max Non-First Lien",                               policy.conc_max_non_first_lien),
-                ("Max EBITDA < $5MM",                                policy.conc_max_small_ebitda),
-                ("Max Obligors",                                     policy.conc_max_obligor),
-                ("Max Largest Industry",                             policy.conc_max_largest_industry),
-                ("Max Second Largest Industry",                      policy.conc_max_second_industry),
-                ("Max Other Industries",                             policy.conc_max_other_industries),
-                ("Fixed Rate",                                       policy.conc_fixed_rate),
-                ("Max Limited Industry",                             policy.conc_limited_industry),
-                ("Max DDTL and Revolver",                            policy.conc_max_ddtl_revolver),
-                ("Max Non-Sponsor/Non-Family Office",                policy.conc_max_non_sponsor),
-                ("Max Div Recap Non-Sponsor/Non-Family Office",      policy.conc_max_div_recap),
-            ]
+            ConcentrationTestResult(label, getattr(policy, field), 0.0, 0.0, 0.0)
+            for label, field in CONCENTRATION_TESTS
         ]
         avail_zero = AvailabilityResult(
             test_a_facility=avail_meta.facility_amount,

@@ -770,6 +770,167 @@ class TestScenarioUnit(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestWaterfallUnit — synthetic edge cases for concentration waterfall + WAAR
+# ---------------------------------------------------------------------------
+
+class TestWaterfallUnit(unittest.TestCase):
+    """Synthetic tests for _run_waterfall() edge cases.
+
+    Each test constructs a minimal WorkbookData with known inputs and asserts
+    on the waterfall outputs. No workbook required.
+    """
+
+    # ---- Zero-ABV portfolio ------------------------------------------------
+
+    def test_zero_abv_waterfall_is_none(self):
+        """Empty portfolio (no eligible loans) → waterfall is None, totals zero.
+
+        calculate_portfolio skips _run_waterfall when eligible_assets is empty.
+        This is the documented contract: callers must guard against waterfall=None.
+        """
+        data = _make_data([])
+        calc = calculate_portfolio(data)
+        self.assertIsNone(calc.waterfall)
+        self.assertEqual(calc.total_pre_conc_eligible_value, 0.0)
+        self.assertEqual(calc.total_borrowing_value, 0.0)
+        self.assertEqual(len(calc.eligible_assets), 0)
+
+    # ---- All-2L portfolio (Max Second Lien test) ---------------------------
+
+    def test_all_second_lien_waterfall_sequence(self):
+        """All-Second Lien portfolio: test 1a fires first, then test 1b sees haircutted values.
+
+        Test 1a ("Max Second Lien & FILO with senior lev >= 1.50x") qualifies ALL
+        Second Lien loans unconditionally — the >= 1.50x threshold applies only to FILO.
+        So for a 100% Second Lien portfolio:
+          - Test 1a: qual=total ABV, excess fired, haircut applied
+          - Test 1b: same loans re-evaluated on post-haircut values → excess=0 (already capped)
+        This documents the waterfall sequential haircut contract.
+        """
+        loans = [
+            _make_loan(f"Co{i}", row=i, loan_type="Second Lien",
+                       current_ebitda_mm=15.0, net_detachment=1.0, net_attachment=1.5,
+                       olb=10_000_000)
+            for i in range(1, 6)
+        ]
+        flags = {f"Co{i}": _make_flags(f"Co{i}") for i in range(1, 6)}
+        data = _make_data(loans, flags=flags)
+        calc = calculate_portfolio(data)
+        w = calc.waterfall
+
+        # Test 1a fires — all 5 Second Lien loans qualify unconditionally
+        test_1a = next(t for t in w.concentration_tests
+                       if t.limit_type == "Max Second Lien & FILO with senior lev >= 1.50x")
+        self.assertGreater(test_1a.excess, 0.0)
+
+        # Test 1b sees post-haircut values — excess already eliminated by test 1a
+        test_1b = next(t for t in w.concentration_tests if t.limit_type == "Max Second Lien")
+        self.assertEqual(test_1b.excess, 0.0)
+
+        # Net ABV is reduced by test 1a haircut
+        self.assertLess(w.net_abv, w.total_abv)
+
+    # ---- Single-obligor portfolio (Max Obligors test) ----------------------
+
+    def test_single_large_obligor_triggers_obligor_test(self):
+        """One obligor whose value exceeds the per-obligor cap triggers haircut.
+
+        Policy: max_obligor = 7.5%. With 1 obligor = 100% of ABV, excess = 92.5%.
+        """
+        loan = _make_loan("BigCo", row=1, olb=50_000_000)
+        flags = {"BigCo": _make_flags("BigCo")}
+        data = _make_data([loan], flags=flags)
+        calc = calculate_portfolio(data)
+        w = calc.waterfall
+
+        obligor_test = next(t for t in w.concentration_tests if t.limit_type == "Max Obligors")
+        self.assertGreater(obligor_test.excess, 0.0)
+
+    # ---- WAAR cap by obligor count -----------------------------------------
+
+    def test_waar_capped_at_low_diversity_below_12_obligors(self):
+        """< 12 eligible obligors → WAAR capped at cap_low_diversity (0.50)."""
+        # 3 eligible loans, all First Lien large EBITDA → uncapped WAAR = 0.675
+        # cap_low_diversity = 0.50 → final_waar should be 0.50
+        loans = [
+            _make_loan(f"Co{i}", row=i, olb=10_000_000, current_ebitda_mm=25.0)
+            for i in range(1, 4)
+        ]
+        flags = {f"Co{i}": _make_flags(f"Co{i}") for i in range(1, 4)}
+        data = _make_data(loans, flags=flags)
+        calc = calculate_portfolio(data)
+        w = calc.waterfall
+
+        self.assertLess(w.discrete_obligor_count, 12)
+        self.assertAlmostEqual(w.applicable_waar_cap, 0.50)
+        self.assertLessEqual(w.final_waar, 0.50 + 1e-9)
+
+    def test_waar_not_capped_when_above_raw(self):
+        """When raw_waar < cap, final_waar == raw_waar (cap not binding)."""
+        # Second Lien loan → advance rate 0.55, which is below any cap (0.50, 0.60, 0.65)
+        loan = _make_loan("Co1", row=1, loan_type="Second Lien",
+                          current_ebitda_mm=15.0, net_detachment=2.0, olb=10_000_000)
+        flags = {"Co1": _make_flags("Co1")}
+        # Use high-diversity policy so cap doesn't apply
+        policy = _make_policy(cap_high_diversity=0.65, threshold_high_diversity=1)
+        data = _make_data([loan], flags=flags, policy=policy)
+        calc = calculate_portfolio(data)
+        w = calc.waterfall
+
+        # raw_waar should be ~0.55 (2L rate), which is below any cap
+        self.assertAlmostEqual(w.raw_waar, w.final_waar, places=4)
+
+    # ---- Concentration test label integrity --------------------------------
+
+    def test_all_13_concentration_labels_present(self):
+        """Waterfall always returns exactly 13 tests with the canonical labels."""
+        from borrowing_base_workbench.calculator import CONCENTRATION_TESTS
+        loans = [_make_loan(f"Co{i}", row=i) for i in range(1, 4)]
+        flags = {f"Co{i}": _make_flags(f"Co{i}") for i in range(1, 4)}
+        data = _make_data(loans, flags=flags)
+        calc = calculate_portfolio(data)
+
+        result_labels = [t.limit_type for t in calc.waterfall.concentration_tests]
+        expected_labels = [label for label, _ in CONCENTRATION_TESTS]
+        self.assertEqual(result_labels, expected_labels)
+
+    def test_select_active_vae_no_vaes_returns_none(self):
+        """_select_active_vae with empty list → None."""
+        from borrowing_base_workbench.calculator import _select_active_vae
+        self.assertIsNone(_select_active_vae([]))
+
+    def test_select_active_vae_all_null_values_returns_none(self):
+        """_select_active_vae when all VAEs have None assigned_value → None."""
+        from borrowing_base_workbench.calculator import _select_active_vae
+        vae = VaeRecord(
+            source_row=1, borrower="A", event_type="x", specific_test="",
+            material_modification="", vae_date=date(2024, 1, 1),
+            ebitda_at_vae=None, agent_adj_haircut=None, permitted_ebitda=None,
+            senior_debt=None, total_debt=None, net_senior_leverage=None,
+            net_total_leverage=None, interest_coverage_at_vae=None,
+            vae_agent_assigned_value=None,
+        )
+        self.assertIsNone(_select_active_vae([vae]))
+
+    def test_select_active_vae_null_date_loses_to_dated(self):
+        """_select_active_vae: undated VAE loses to a dated one."""
+        from borrowing_base_workbench.calculator import _select_active_vae
+        def _vae(d, val):
+            return VaeRecord(
+                source_row=1, borrower="A", event_type="x", specific_test="",
+                material_modification="", vae_date=d,
+                ebitda_at_vae=None, agent_adj_haircut=None, permitted_ebitda=None,
+                senior_debt=None, total_debt=None, net_senior_leverage=None,
+                net_total_leverage=None, interest_coverage_at_vae=None,
+                vae_agent_assigned_value=val,
+            )
+        undated = _vae(None, 9_000_000.0)
+        dated   = _vae(date(2024, 6, 1), 3_000_000.0)
+        # dated is more recent (None treated as date.min) → should win
+        self.assertAlmostEqual(_select_active_vae([undated, dated]), 3_000_000.0)
+
+
+# ---------------------------------------------------------------------------
 # TestIntegration — full pipeline against real workbook
 # ---------------------------------------------------------------------------
 

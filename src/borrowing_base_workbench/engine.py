@@ -15,32 +15,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from borrowing_base_workbench.calculator import calculate_portfolio
+from borrowing_base_workbench.calculator import CONCENTRATION_TESTS, calculate_portfolio
 from borrowing_base_workbench.loader import RuntimeData, load_workbook, load_workbook_data
 from borrowing_base_workbench.scenario import build_scenario_records, inject_scenario
 
-# ---------------------------------------------------------------------------
-# Concentration limit label order
-# ---------------------------------------------------------------------------
-# limit_type strings are matched by key in app.py._populate_results_view.
-# They MUST be exactly these strings, in this order.
-# ---------------------------------------------------------------------------
-
-_CONCENTRATION_LABEL_ORDER = [
-    "Max Second Lien & FILO with senior lev >= 1.50x",
-    "Max Second Lien",
-    "Max Non-First Lien",
-    "Max EBITDA < $5MM",
-    "Max Obligors",
-    "Max Largest Industry",
-    "Max Second Largest Industry",
-    "Max Other Industries",
-    "Fixed Rate",
-    "Max Limited Industry",
-    "Max DDTL and Revolver",
-    "Max Non-Sponsor/Non-Family Office",
-    "Max Div Recap Non-Sponsor/Non-Family Office",
-]
+# _CONCENTRATION_LABEL_ORDER removed — use CONCENTRATION_TESTS from calculator.py
+# (imported above). Labels and ordering are now defined in one place.
 
 
 # ---------------------------------------------------------------------------
@@ -92,14 +72,14 @@ def _concentration_limits_from_waterfall(calc) -> list[dict]:
         return [
             {"limit_type": lbl, "limit_percent": pct_map.get(lbl, 0.0),
              "applicable_limit": 0.0, "actual": 0.0, "excess": 0.0}
-            for lbl in _CONCENTRATION_LABEL_ORDER
+            for lbl, _ in CONCENTRATION_TESTS
         ]
 
     # Index the waterfall results by label for O(1) lookup
     test_by_label = {t.limit_type: t for t in w.concentration_tests}
 
     rows = []
-    for lbl in _CONCENTRATION_LABEL_ORDER:
+    for lbl, _ in CONCENTRATION_TESTS:
         t = test_by_label.get(lbl)
         if t:
             rows.append({
