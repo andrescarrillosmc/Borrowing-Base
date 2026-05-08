@@ -1096,10 +1096,12 @@ class TestIntegration(unittest.TestCase):
         )
 
     def test_probe_workbook_concentration_labels(self):
-        from borrowing_base_workbench.engine import probe_workbook, _CONCENTRATION_LABEL_ORDER
+        from borrowing_base_workbench.engine import probe_workbook
+        from borrowing_base_workbench.calculator import CONCENTRATION_TESTS
         result = probe_workbook(WORKBOOK)
         returned_labels = [r["limit_type"] for r in result["concentration_limits"]]
-        self.assertEqual(returned_labels, _CONCENTRATION_LABEL_ORDER)
+        expected_labels = [lbl for lbl, _ in CONCENTRATION_TESTS]
+        self.assertEqual(returned_labels, expected_labels)
 
     def test_run_pro_forma_contract(self):
         """run_pro_forma() must return {status, before, after, eligibility} with all keys."""
